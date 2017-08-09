@@ -1,0 +1,642 @@
+diff --git a/include/qpid/dispatch/server.h b/include/qpid/dispatch/server.h
+index ba8494a..4a60128 100644
+--- a/include/qpid/dispatch/server.h
++++ b/include/qpid/dispatch/server.h
+@@ -23,6 +23,7 @@
+ #include <qpid/dispatch/failoverlist.h>
+ #include <proton/engine.h>
+ #include <proton/event.h>
++#include <proton/ssl.h>
+ 
+ struct qd_container_t;
+ 
+@@ -152,6 +153,13 @@ typedef struct qd_server_config_t {
+     char *sasl_mechanisms;
+ 
+     /**
++     * Address, i.e. host:port, of remote authentication service to connect to.
++     * (listener only)
++     */
++    char *auth_service;
++    pn_ssl_domain_t *auth_ssl_conf;
++
++    /**
+      * If appropriate for the mechanism, the username for authentication
+      * (connector only)
+      */
+diff --git a/python/qpid_dispatch/management/qdrouter.json b/python/qpid_dispatch/management/qdrouter.json
+index e80359f..354e522 100644
+--- a/python/qpid_dispatch/management/qdrouter.json
++++ b/python/qpid_dispatch/management/qdrouter.json
+@@ -616,6 +616,18 @@
+                     "description": "yes: Require the peer's identity to be authenticated; no: Do not require any authentication.",
+                     "create": true
+                 },
++                "authService": {
++                    "type": "string",
++                    "description": "Address of a service to delegate authentication to. (Will use local sasl config if this is not set)",
++                    "required": false,
++                    "create": true
++                },
++                "authSslProfile": {
++                    "type": "string",
++                    "required": false,
++                    "description": "Name of the sslProfile to use for the authentication service.",
++                    "create": true
++                },
+                 "requireEncryption": {
+                     "type": "boolean",
+                     "default": false,
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 10cd7c6..8a1602e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -69,6 +69,7 @@ set(qpid_dispatch_SOURCES
+   message.c
+   parse.c
+   policy.c
++  remote_sasl.c
+   posix/threading.c
+   python_embedded.c
+   router_agent.c
+diff --git a/src/connection_manager.c b/src/connection_manager.c
+index 513b16c..c3e0354 100644
+--- a/src/connection_manager.c
++++ b/src/connection_manager.c
+@@ -104,6 +104,8 @@ void qd_server_config_free(qd_server_config_t *cf)
+     if (cf->sasl_username)   free(cf->sasl_username);
+     if (cf->sasl_password)   free(cf->sasl_password);
+     if (cf->sasl_mechanisms) free(cf->sasl_mechanisms);
++    if (cf->auth_service)    free(cf->auth_service);
++    if (cf->auth_ssl_conf)   pn_ssl_domain_free(cf->auth_ssl_conf);
+     if (cf->ssl_profile)     free(cf->ssl_profile);
+     if (cf->failover_list)   qd_failover_list_free(cf->failover_list);
+     if (cf->log_message)     free(cf->log_message);
+@@ -299,6 +301,7 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
+     config->sasl_username        = qd_entity_opt_string(entity, "saslUsername", 0);   CHECK();
+     config->sasl_password        = qd_entity_opt_string(entity, "saslPassword", 0);   CHECK();
+     config->sasl_mechanisms      = qd_entity_opt_string(entity, "saslMechanisms", 0); CHECK();
++    config->auth_service         = qd_entity_opt_string(entity, "authService", 0);    CHECK();
+     config->ssl_profile          = qd_entity_opt_string(entity, "sslProfile", 0);     CHECK();
+     config->link_capacity        = qd_entity_opt_long(entity, "linkCapacity", 0);     CHECK();
+     config->multi_tenant         = qd_entity_opt_bool(entity, "multiTenant", false);  CHECK();
+@@ -378,6 +381,33 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
+         }
+     }
+ 
++    char* auth_ssl_profile_name = qd_entity_opt_string(entity, "authSslProfile", 0);     CHECK();
++    if (auth_ssl_profile_name) {
++        qd_config_ssl_profile_t *auth_ssl_profile =
++            qd_find_ssl_profile(qd->connection_manager, auth_ssl_profile_name);
++        config->auth_ssl_conf = pn_ssl_domain(PN_SSL_MODE_CLIENT);
++
++        if (auth_ssl_profile->ssl_certificate_file) {
++            if (pn_ssl_domain_set_credentials(config->auth_ssl_conf,
++                                              auth_ssl_profile->ssl_certificate_file,
++                                              auth_ssl_profile->ssl_private_key_file,
++                                              auth_ssl_profile->ssl_password)) {
++                qd_error(QD_ERROR_RUNTIME, "Cannot set SSL credentials for authentication service"); CHECK();
++            }
++        }
++        if (auth_ssl_profile->ssl_trusted_certificate_db) {
++            if (pn_ssl_domain_set_trusted_ca_db(config->auth_ssl_conf, auth_ssl_profile->ssl_trusted_certificate_db)) {
++                qd_error(QD_ERROR_RUNTIME, "Cannot set trusted SSL certificate db for authentication service" ); CHECK();
++            } else {
++                if (pn_ssl_domain_set_peer_authentication(config->auth_ssl_conf, PN_SSL_VERIFY_PEER, auth_ssl_profile->ssl_trusted_certificate_db)) {
++                    qd_error(QD_ERROR_RUNTIME, "Cannot set SSL peer verification for authentication service"); CHECK();
++                }
++            }
++        }
++
++
++    }
++
+     return QD_ERROR_NONE;
+ 
+   error:
+diff --git a/src/dispatch.c b/src/dispatch.c
+index eb0c6eb..f25d109 100644
+--- a/src/dispatch.c
++++ b/src/dispatch.c
+@@ -186,6 +186,7 @@ qd_error_t qd_dispatch_configure_router(qd_dispatch_t *qd, qd_entity_t *entity)
+     if (! qd->sasl_config_name) {
+         qd->sasl_config_name = qd_entity_opt_string(entity, "saslConfigName", "qdrouterd"); QD_ERROR_RET();
+     }
++    qd->auth_service = qd_entity_opt_string(entity, "authService", 0); QD_ERROR_RET();
+ 
+     char *dump_file = qd_entity_opt_string(entity, "debugDump", 0); QD_ERROR_RET();
+     if (dump_file) {
+diff --git a/src/dispatch_private.h b/src/dispatch_private.h
+index 8b46d71..aa04dcb 100644
+--- a/src/dispatch_private.h
++++ b/src/dispatch_private.h
+@@ -56,6 +56,7 @@ struct qd_dispatch_t {
+     int    thread_count;
+     char  *sasl_config_path;
+     char  *sasl_config_name;
++    char  *auth_service;
+     char  *router_area;
+     char  *router_id;
+     qd_router_mode_t  router_mode;
+diff --git a/src/remote_sasl.c b/src/remote_sasl.c
+new file mode 100644
+index 0000000..9a58824
+--- /dev/null
++++ b/src/remote_sasl.c
+@@ -0,0 +1,425 @@
++/*
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ *
++ */
++
++#include "remote_sasl.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <proton/engine.h>
++#include <proton/proactor.h>
++#include <proton/sasl.h>
++#include <proton/sasl-plugin.h>
++
++typedef struct
++{
++    size_t size;
++    char *start;
++} qdr_owned_bytes_t;
++
++const int8_t UPSTREAM_INIT_RECEIVED = 1;
++const int8_t UPSTREAM_RESPONSE_RECEIVED = 2;
++const int8_t DOWNSTREAM_MECHANISMS_RECEIVED = 3;
++const int8_t DOWNSTREAM_CHALLENGE_RECEIVED = 4;
++const int8_t DOWNSTREAM_OUTCOME_RECEIVED = 5;
++const int8_t DOWNSTREAM_CLOSED = 6;
++
++typedef struct
++{
++    char* authentication_service_address;
++    pn_ssl_domain_t* ssl_domain;
++
++    pn_connection_t* downstream;
++    char* selected_mechanism;
++    qdr_owned_bytes_t response;
++    int8_t downstream_state;
++    bool downstream_released;
++
++    pn_connection_t* upstream;
++    char* mechlist;
++    qdr_owned_bytes_t challenge;
++    int8_t upstream_state;
++    bool upstream_released;
++
++    bool complete;
++    char* username;
++    pn_sasl_outcome_t outcome;
++} qdr_sasl_relay_t;
++
++static void copy_bytes(const pn_bytes_t* from, qdr_owned_bytes_t* to)
++{
++    if (to->start) {
++        free(to->start);
++    }
++    to->start = (char*) malloc(from->size);
++    to->size = from->size;
++    memcpy(to->start, from->start, from->size);
++}
++
++static qdr_sasl_relay_t* new_qdr_sasl_relay_t(const char* address)
++{
++    qdr_sasl_relay_t* instance = (qdr_sasl_relay_t*) malloc(sizeof(qdr_sasl_relay_t));
++    instance->authentication_service_address = strdup(address);
++    instance->selected_mechanism = 0;
++    instance->response.start = 0;
++    instance->response.size = 0;
++    instance->mechlist = 0;
++    instance->challenge.start = 0;
++    instance->challenge.size = 0;
++    instance->upstream_state = 0;
++    instance->downstream_state = 0;
++    instance->upstream_released = false;
++    instance->downstream_released = false;
++    instance->complete = false;
++    instance->upstream = 0;
++    instance->downstream = 0;
++    instance->username = 0;
++    return instance;
++}
++
++static void delete_qdr_sasl_relay_t(qdr_sasl_relay_t* instance)
++{
++    if (instance->authentication_service_address) free(instance->authentication_service_address);
++    if (instance->mechlist) free(instance->mechlist);
++    if (instance->selected_mechanism) free(instance->selected_mechanism);
++    if (instance->response.start) free(instance->response.start);
++    if (instance->challenge.start) free(instance->challenge.start);
++    if (instance->username) free(instance->username);
++    free(instance);
++}
++
++PN_HANDLE(REMOTE_SASL_CTXT)
++
++bool qdr_is_authentication_service_connection(pn_connection_t* conn)
++{
++    if (conn) {
++        pn_record_t *r = pn_connection_attachments(conn);
++        return pn_record_has(r, REMOTE_SASL_CTXT);
++    } else {
++        return false;
++    }
++}
++
++static qdr_sasl_relay_t* get_sasl_relay_context(pn_connection_t* conn)
++{
++    if (conn) {
++        pn_record_t *r = pn_connection_attachments(conn);
++        if (pn_record_has(r, REMOTE_SASL_CTXT)) {
++            return (qdr_sasl_relay_t*) pn_record_get(r, REMOTE_SASL_CTXT);
++        } else {
++            return NULL;
++        }
++    } else {
++        return NULL;
++    }
++}
++
++static void set_sasl_relay_context(pn_connection_t* conn, qdr_sasl_relay_t* context)
++{
++    pn_record_t *r = pn_connection_attachments(conn);
++    pn_record_def(r, REMOTE_SASL_CTXT, PN_VOID);
++    pn_record_set(r, REMOTE_SASL_CTXT, context);
++}
++
++static bool remote_sasl_init_server(pn_transport_t* transport)
++{
++    pn_connection_t* upstream = pn_transport_connection(transport);
++    if (upstream && pnx_sasl_get_context(transport)) {
++        qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++        if (impl->upstream) return true;
++        impl->upstream = upstream;
++        pn_proactor_t* proactor = pn_connection_proactor(upstream);
++        if (!proactor) return false;
++        impl->downstream = pn_connection();
++        pn_connection_set_hostname(impl->downstream, pn_connection_get_hostname(upstream));
++        pn_connection_set_user(impl->downstream, "dummy");//force sasl
++        set_sasl_relay_context(impl->downstream, impl);
++
++        pn_proactor_connect(proactor, impl->downstream, impl->authentication_service_address);
++        return true;
++    } else {
++        return false;
++    }
++}
++
++static bool remote_sasl_init_client(pn_transport_t* transport)
++{
++    //for the client side of the connection to the authentication
++    //service, need to use the same context as the server side of the
++    //connection it is authenticating on behalf of
++    pn_connection_t* conn = pn_transport_connection(transport);
++    qdr_sasl_relay_t* impl = get_sasl_relay_context(conn);
++    if (impl) {
++        pnx_sasl_set_context(transport, impl);
++        return true;
++    } else {
++        return false;
++    }
++}
++
++static void remote_sasl_free(pn_transport_t *transport)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl) {
++        if (pnx_sasl_is_client(transport)) {
++            impl->downstream_released = true;
++            if (impl->upstream_released) {
++                delete_qdr_sasl_relay_t(impl);
++            } else {
++                pn_connection_wake(impl->upstream);
++            }
++        } else {
++            impl->upstream_released = true;
++            if (impl->downstream_released) {
++                delete_qdr_sasl_relay_t(impl);
++            } else {
++                pn_connection_wake(impl->downstream);
++            }
++        }
++    }
++}
++
++static void remote_sasl_prepare(pn_transport_t *transport)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (!impl) return;
++    if (pnx_sasl_is_client(transport)) {
++        if (impl->downstream_state == UPSTREAM_INIT_RECEIVED) {
++            pnx_sasl_set_selected_mechanism(transport, strdup(impl->selected_mechanism));
++            pnx_sasl_set_bytes_out(transport, pn_bytes(impl->response.size, impl->response.start));
++            pnx_sasl_set_desired_state(transport, SASL_POSTED_INIT);
++        } else if (impl->downstream_state == UPSTREAM_RESPONSE_RECEIVED) {
++            pnx_sasl_set_bytes_out(transport, pn_bytes(impl->response.size, impl->response.start));
++            pnx_sasl_set_desired_state(transport, SASL_POSTED_RESPONSE);
++        }
++        impl->downstream_state = 0;
++    } else {
++        if (impl->upstream_state == DOWNSTREAM_MECHANISMS_RECEIVED) {
++            pnx_sasl_set_desired_state(transport, SASL_POSTED_MECHANISMS);
++        } else if (impl->upstream_state == DOWNSTREAM_CHALLENGE_RECEIVED) {
++            pnx_sasl_set_bytes_out(transport, pn_bytes(impl->challenge.size, impl->challenge.start));
++            pnx_sasl_set_desired_state(transport, SASL_POSTED_CHALLENGE);
++        } else if (impl->upstream_state == DOWNSTREAM_OUTCOME_RECEIVED) {
++            switch (impl->outcome) {
++            case PN_SASL_OK:
++                pnx_sasl_succeed_authentication(transport, impl->username);
++                break;
++            default:
++                pnx_sasl_fail_authentication(transport);
++            }
++            pnx_sasl_set_desired_state(transport, SASL_POSTED_OUTCOME);
++        }
++        impl->upstream_state = 0;
++    }
++}
++
++static bool notify_upstream(qdr_sasl_relay_t* impl, uint8_t state)
++{
++    if (!impl->upstream_released) {
++        impl->upstream_state = state;
++        pn_connection_wake(impl->upstream);
++        return true;
++    } else {
++        return false;
++    }
++}
++
++static bool notify_downstream(qdr_sasl_relay_t* impl, uint8_t state)
++{
++    if (!impl->downstream_released) {
++        impl->downstream_state = state;
++        pn_connection_wake(impl->downstream);
++        return true;
++    } else {
++        return false;
++    }
++}
++
++// Client / Downstream
++static bool remote_sasl_process_mechanisms(pn_transport_t *transport, const char *mechs)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl) {
++        impl->mechlist = strdup(mechs);
++        if (notify_upstream(impl, DOWNSTREAM_MECHANISMS_RECEIVED)) {
++            return true;
++        } else {
++            pnx_sasl_set_desired_state(transport, SASL_ERROR);
++            return false;
++        }
++    } else {
++        return false;
++    }
++}
++
++// Client / Downstream
++static void remote_sasl_process_challenge(pn_transport_t *transport, const pn_bytes_t *recv)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl) {
++        copy_bytes(recv, &(impl->challenge));
++        if (!notify_upstream(impl, DOWNSTREAM_CHALLENGE_RECEIVED)) {
++            pnx_sasl_set_desired_state(transport, SASL_ERROR);
++        }
++    }
++}
++
++// Client / Downstream
++static void remote_sasl_process_outcome(pn_transport_t *transport)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl) {
++        pn_sasl_t* sasl = pn_sasl(transport);
++        if (sasl) {
++            impl->outcome = pn_sasl_outcome(sasl);
++            impl->username = strdup(pn_sasl_get_user(sasl));
++            impl->complete = true;
++            if (!notify_upstream(impl, DOWNSTREAM_OUTCOME_RECEIVED)) {
++                pnx_sasl_set_desired_state(transport, SASL_ERROR);
++            }
++        }
++    }
++}
++
++// Server / Upstream
++static const char* remote_sasl_list_mechs(pn_transport_t *transport)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl && impl->mechlist) {
++        return impl->mechlist;
++    } else {
++        return NULL;
++    }
++}
++
++// Server / Upstream
++static void remote_sasl_process_init(pn_transport_t *transport, const char *mechanism, const pn_bytes_t *recv)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl) {
++        impl->selected_mechanism = strdup(mechanism);
++        copy_bytes(recv, &(impl->response));
++        if (!notify_downstream(impl, UPSTREAM_INIT_RECEIVED)) {
++            pnx_sasl_set_desired_state(transport, SASL_ERROR);
++        }
++    }
++}
++
++// Server / Upstream
++static void remote_sasl_process_response(pn_transport_t *transport, const pn_bytes_t *recv)
++{
++    qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++    if (impl) {
++        copy_bytes(recv, &(impl->response));
++        if (!notify_downstream(impl, UPSTREAM_RESPONSE_RECEIVED)) {
++            pnx_sasl_set_desired_state(transport, SASL_ERROR);
++        }
++    }
++}
++
++static bool remote_sasl_can_encrypt(pn_transport_t *transport)
++{
++    return false;
++}
++
++static ssize_t remote_sasl_max_encrypt_size(pn_transport_t *transport)
++{
++    return 0;
++}
++static ssize_t remote_sasl_encode(pn_transport_t *transport, pn_bytes_t in, pn_bytes_t *out)
++{
++    return 0;
++}
++static ssize_t remote_sasl_decode(pn_transport_t *transport, pn_bytes_t in, pn_bytes_t *out)
++{
++    return 0;
++}
++
++
++static const pnx_sasl_implementation remote_sasl_impl = {
++    remote_sasl_free,
++    remote_sasl_list_mechs,
++    remote_sasl_init_server,
++    remote_sasl_init_client,
++    remote_sasl_prepare,
++    remote_sasl_process_init,
++    remote_sasl_process_response,
++    remote_sasl_process_mechanisms,
++    remote_sasl_process_challenge,
++    remote_sasl_process_outcome,
++    remote_sasl_can_encrypt,
++    remote_sasl_max_encrypt_size,
++    remote_sasl_encode,
++    remote_sasl_decode
++};
++
++static void set_remote_impl(pn_transport_t *transport, qdr_sasl_relay_t* context)
++{
++    pnx_sasl_set_implementation(transport, &remote_sasl_impl, context);
++}
++
++void qdr_use_remote_authentication_service(pn_transport_t *transport, const char* address, pn_ssl_domain_t* ssl_domain)
++{
++    qdr_sasl_relay_t* context = new_qdr_sasl_relay_t(address);
++    context->ssl_domain = ssl_domain;
++    set_remote_impl(transport, context);
++}
++
++void qdr_handle_authentication_service_connection_event(pn_event_t *e)
++{
++    pn_connection_t *conn = pn_event_connection(e);
++    pn_transport_t *transport = pn_event_transport(e);
++    if (pn_event_type(e) == PN_CONNECTION_BOUND) {
++        pnx_sasl_logf(transport, "Handling connection bound event for authentication service connection");
++        qdr_sasl_relay_t* context = get_sasl_relay_context(conn);
++        if (context->ssl_domain) {
++            pn_ssl_t* ssl = pn_ssl(transport);
++            if (!ssl || pn_ssl_init(ssl, context->ssl_domain, 0)) {
++                pnx_sasl_logf(transport, "Cannot initialise SSL");
++            } else {
++                pnx_sasl_logf(transport, "Successfully initialised SSL");
++            }
++        }
++        set_remote_impl(pn_event_transport(e), context);
++    } else if (pn_event_type(e) == PN_CONNECTION_REMOTE_OPEN) {
++        pnx_sasl_logf(transport, "authentication against service complete; closing connection");
++        pn_connection_close(conn);
++    } else if (pn_event_type(e) == PN_CONNECTION_REMOTE_CLOSE) {
++        pnx_sasl_logf(transport, "authentication service closed connection");
++        pn_connection_close(conn);
++        pn_transport_close_head(transport);
++    } else if (pn_event_type(e) == PN_TRANSPORT_CLOSED) {
++        pnx_sasl_logf(transport, "disconnected from authentication service");
++        qdr_sasl_relay_t* impl = (qdr_sasl_relay_t*) pnx_sasl_get_context(transport);
++        if (impl->downstream) {
++            pn_connection_release(impl->downstream);
++            impl->downstream = 0;
++            pnx_sasl_logf(transport, "authentication service: downstream connection released");
++        }
++        if (!impl->complete) {
++            notify_upstream(impl, DOWNSTREAM_CLOSED);
++        }
++    } else if (transport) {
++        pnx_sasl_logf(transport, "Ignoring event for authentication service connection: %s", pn_event_type_name(pn_event_type(e)));
++    } else {
++        printf("transport is null for %s\n", pn_event_type_name(pn_event_type(e)));
++    }
++}
+diff --git a/src/remote_sasl.h b/src/remote_sasl.h
+new file mode 100644
+index 0000000..967d82f
+--- /dev/null
++++ b/src/remote_sasl.h
+@@ -0,0 +1,31 @@
++#ifndef __remote_sasl_h__
++#define __remote_sasl_h__ 1
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++#include <proton/event.h>
++#include <proton/ssl.h>
++#include <proton/types.h>
++
++void qdr_use_remote_authentication_service(pn_transport_t* transport, const char* address, pn_ssl_domain_t* ssl_domain);
++bool qdr_is_authentication_service_connection(pn_connection_t* conn);
++void qdr_handle_authentication_service_connection_event(pn_event_t *e);
++
++#endif /* remote_sasl.h */
+diff --git a/src/server.c b/src/server.c
+index c1bf43c..998f1f1 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -40,6 +40,7 @@
+ #include "timer_private.h"
+ #include "alloc.h"
+ #include "config.h"
++#include "remote_sasl.h"
+ #include <stdio.h>
+ #include <string.h>
+ #include <errno.h>
+@@ -621,6 +622,10 @@ static void on_connection_bound(qd_server_t *server, pn_event_t *e) {
+         pn_sasl_config_name(sasl, ctx->server->sasl_config_name);
+         if (config->sasl_mechanisms)
+             pn_sasl_allowed_mechs(sasl, config->sasl_mechanisms);
++        if (config->auth_service) {
++            qd_log(server->log_source, QD_LOG_INFO, "enabling remote authentication service %s", config->auth_service);
++            qdr_use_remote_authentication_service(tport, config->auth_service, config->auth_ssl_conf);
++        }
+         pn_transport_require_auth(tport, config->requireAuthentication);
+         pn_transport_require_encryption(tport, config->requireEncryption);
+         pn_sasl_set_allow_insecure_mechs(sasl, config->allowInsecureAuthentication);
+@@ -751,6 +756,10 @@ void qd_connection_free(qd_connection_t *ctx)
+  */
+ static bool handle(qd_server_t *qd_server, pn_event_t *e) {
+     pn_connection_t *pn_conn = pn_event_connection(e);
++    if (pn_conn && qdr_is_authentication_service_connection(pn_conn)) {
++        qdr_handle_authentication_service_connection_event(e);
++        return true;
++    }
+     qd_connection_t *ctx  = pn_conn ? (qd_connection_t*) pn_connection_get_context(pn_conn) : NULL;
+ 
+     switch (pn_event_type(e)) {
