@@ -9,7 +9,7 @@ services:
 script:
 - make
 - curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/docker-build.sh
-  | bash /dev/stdin enmasseproject/qdrouterd-base . 0.9.0-1 0.9.0-1
+  | bash /dev/stdin enmasseproject/qdrouterd-base . 1.0.0-alpha1 1.0.0-alpha1
 - curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/trigger-travis.sh
   | bash /dev/stdin enmasse
 env:
