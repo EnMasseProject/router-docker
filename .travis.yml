@@ -9,13 +9,14 @@ services:
 script:
 - make
 - curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/docker-build.sh
-  | bash /dev/stdin enmasseproject/qdrouterd-base . 1.0.0-alpha3 1.0.0-alpha3
+  | bash /dev/stdin enmasseproject/qdrouterd-base . $VERSION $VERSION
 - curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/docker-push.sh
-  | bash /dev/stdin enmasseproject/qdrouterd-base 1.0.0-alpha3
+  | bash /dev/stdin enmasseproject/qdrouterd-base $VERSION
 - curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/trigger-travis.sh
   | bash /dev/stdin enmasse
 env:
   global:
+  - VERSION=1.0.0-alpha4
   - COMMIT=${TRAVIS_COMMIT::8}
   - secure: PQhg/AjkM4s5PSwiOUi1rC26ZiUJMOHUw3zC6ceGecrOYiRyH8l11HK46AmNG+j9vjG33HerTGpPgQPCLB5WZTsazwiQrj6OIorChxJ8OnxOfpKT175hd0l+UnDvljuQLUr2dWYSLuR67garkK4c0hp6BcN6wBUQ1ZwO7aGqno+QV5Nu7NpE5kXCow8rYsRYnRgEsJ1nWmGOpmP1H7+Jxx7QHf6/xybfnVlxlu7lsSGPwoWK360zEKfogMF/L4AJoxgXPK0ietYi1Pf8KJ4wtNpZMvL0aigjZlRG3du7gTE3qoDxcZ01GbjOd2YyAkA5nwSog3vSw9z8YOgZiNinihV7pSv6CJjnPpBzbRAVEgHK2LWR8hRJBd1rhUzsjocaypJLBcrOX40aoczTrZ/jzvo2V+4+6Q6VUp/Lu5avIYW6eVRMnV7bmxU/8RXMS8SJYtmMQFHvgZKhf3KjZHju1I/0NZXtqGoh5YCKao5iE6KVt6kGygTvToUJdj4RFS9Y6fnNZwl4jpAOrmampoIp3Qy+NucMwep4uFbVKjj6XMlJGabC122i+edZODD/ZdVgjeD0Kasf1mFHwexofmYt9vTzoTi9na1U14OWGFSZwaxFJzuIQ3OHymMwK/heOr9J0Ck+fptxJS6cGGtaL5pp+iol7mXiELxgX+jkWSVHbJg=
   - secure: DclGvJHzpcEHLFjyqXs1PSzkb17KbGRnlx9VVDQFF469RTyHMz0daDHcGo6/qRNqgznv1HUdDwVH3h0hO5A9DlAdHNVshyhnydUvva92O+NlXFYreo28oCTkHXx8eNVIlvEwuDexnBv1u5Cah2s7z0tGxBprBbvqoFefA4aLrDVkHhk1tUfgE9BaCgbKUhBY0mk4J72wb2SNSq5WIUgGGDHcVBKBsgPeyxS0VKhlXDHQ4VNyTRAE5mKGGPesmtLXSu55DT1cjsSBIq/r4nn3VEU/BzWDrlh7N9qSQyCkaePohzEYAp+gMv8wTx/UlBDVdlAtV2Knghzxg4jGe16UghkIt7JPYs9KHugZ/xrPkDn5RtEyUiTG2wM6R/mJ0AVCr9yy02Akc0Q7qU49PTeWl2Z6QxUD53wtKvKVR2lQkVZxKX1I34GdhZafMTgYRcle3xabpIdjIz8XtMwGJvkXeeYK9r4jOPucBvNwl/yx9mP4OfY3rswQrORypImL4HvuTXmUPlJwdWtVgMbtWUE4tuZybMkX4HeX3E2nCvM7TAAb5gYu2bQ/DhMYGu88p2AnSWePJGWPJ3CvP4+q0IzyQbvs1XKg+LDhC37Xbs2z6KGxYs7kYu36/Wph2N7yPvO1hHXJwOiqWtEsSgKGxM+eixgVz04rNY+uf99c5I6oikI=
