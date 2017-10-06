@@ -4,7 +4,7 @@ BASE=`dirname $0`
 ABS_BASE=`cd $BASE && pwd`
 WORKING=`pwd`
 OUTDIR=${4:-$ABS_BASE}
-PATCHES=$3
+PATCHES=transport_log.patch
 
 wget ${1:-http://github.com/apache/qpid-dispatch/archive/master.tar.gz} -O qpid-dispatch.tar.gz
 wget ${2:-http://github.com/apache/qpid-proton/archive/master.tar.gz} -O qpid-proton.tar.gz
