@@ -1,4 +1,4 @@
-FROM gordons/qpid-proton-master:latest
+FROM gordons/qpid-proton:0.18
 ADD qpid-dispatch-image.tar.gz /
 RUN dnf -y install gettext hostname iputils
 ARG version=latest
