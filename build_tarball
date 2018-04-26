@@ -4,7 +4,7 @@ BASE=`dirname $0`
 ABS_BASE=`cd $BASE && pwd`
 WORKING=`pwd`
 OUTDIR=${4:-$ABS_BASE}
-PATCHES=$3
+PATCHES=${3:-$ABS_BASE/295.patch}
 
 wget ${1:-https://dist.apache.org/repos/dist/dev/qpid/dispatch/1.1.0-rc1/qpid-dispatch-1.1.0.tar.gz} -O qpid-dispatch.tar.gz
 wget ${2:-http://archive.apache.org/dist/qpid/proton/0.22.0/qpid-proton-0.22.0.tar.gz} -O qpid-proton.tar.gz
@@ -17,6 +17,6 @@ for patch in $PATCHES; do
 done;
 
 cd proton_build
-cmake -DCMAKE_INSTALL_PREFIX=$WORKING/proton_install -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_CPP=OFF -DBUILD_PERL=OFF -DBUILD_RUBY=OFF -DBUILD_GO=OFF -DBUILD_JAVASCRIPT=OFF -DBUILD_PHP=OFF $WORKING/qpid-proton-src/ && make && make install
+cmake -DCMAKE_INSTALL_PREFIX=$WORKING/proton_install -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_CPP=OFF -DBUILD_RUBY=OFF -DBUILD_GO=OFF $WORKING/qpid-proton-src/ && make && make install
 cd $WORKING/build
 CMAKE_PREFIX_PATH=$WORKING/proton_install cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_DOCS=OFF -DCONSOLE_INSTALL=OFF -DCMAKE_INSTALL_PREFIX=/usr $WORKING/qpid-dispatch-src/ && make && make DESTDIR=$WORKING/staging/ install && tar -z -C $WORKING/staging/ -cf $OUTDIR/qpid-dispatch-image.tar.gz usr etc
