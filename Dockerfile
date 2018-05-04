@@ -1,4 +1,4 @@
-FROM gordons/qpid-proton:0.22.0
+FROM gordons/qpid-proton:0.21.0
 ADD qpid-dispatch-image.tar.gz /
 RUN dnf -y install gettext hostname iputils libwebsockets-devel
 ARG version=latest
