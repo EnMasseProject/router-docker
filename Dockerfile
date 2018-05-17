@@ -1,6 +1,6 @@
-FROM gordons/qpid-proton:0.21.0
+FROM fedora:25
+RUN dnf -y install cyrus-sasl-lib cyrus-sasl-plain gettext hostname iputils libuuid openssl libwebsockets-devel python && dnf clean all
 ADD qpid-dispatch-image.tar.gz /
-RUN dnf -y install gettext hostname iputils libwebsockets-devel
 ARG version=latest
 ENV VERSION=${version}
 
