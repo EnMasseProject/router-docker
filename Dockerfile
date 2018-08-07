@@ -1,6 +1,6 @@
-FROM gordons/qpid-proton:0.23
-ADD qpid-dispatch-image.tar.gz /
-RUN dnf -y install gettext hostname iputils libwebsockets-devel
+FROM fedora:25
+RUN dnf -y install glibc.i686 cyrus-sasl-lib cyrus-sasl-plain libuuid openssl python gettext hostname iputils libwebsockets-devel && dnf -y update && dnf clean all
+ADD qpid-proton-image.tar.gz qpid-dispatch-image.tar.gz /
 ARG version=latest
 ENV VERSION=${version}
 
