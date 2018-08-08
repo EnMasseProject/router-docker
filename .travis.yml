@@ -7,13 +7,7 @@ jdk:
 services:
 - docker
 script:
-- make
-- curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/docker-build.sh
-  | bash /dev/stdin enmasseproject/qdrouterd-base . $VERSION $VERSION
-- curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/docker-push.sh
-  | bash /dev/stdin enmasseproject/qdrouterd-base $VERSION
-- curl -s https://raw.githubusercontent.com/EnMasseProject/travis-scripts/master/trigger-travis.sh
-  | bash /dev/stdin enmasse
+- .travis/build.sh $VERSION $COMMIT
 env:
   global:
   - VERSION=1.3.0-rc1
