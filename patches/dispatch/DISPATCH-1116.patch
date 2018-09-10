@@ -1,0 +1,20 @@
+commit 6c34481438d6c268d3e8debd238e8d5131ff7be1
+Author: Gordon Sim <gsim@redhat.com>
+Date:   Thu Sep 6 20:12:04 2018 +0100
+
+    DISPATCH-1116: prevent module being updated on log instances
+
+diff --git a/python/qpid_dispatch/management/qdrouter.json b/python/qpid_dispatch/management/qdrouter.json
+index 8a49260d..06324afe 100644
+--- a/python/qpid_dispatch/management/qdrouter.json
++++ b/python/qpid_dispatch/management/qdrouter.json
+@@ -999,8 +999,7 @@
+                         "DEFAULT"
+                     ],
+                     "required": true,
+-                    "description": "Module to configure. The special module 'DEFAULT' specifies defaults for all modules.",
+-                    "update": true
++                    "description": "Module to configure. The special module 'DEFAULT' specifies defaults for all modules."
+                 },
+                 "enable": {
+                     "type": "string",
