@@ -1,0 +1,66 @@
+commit 033252a6f132f8dc30864bf2083a8bdba57353d8
+Author: Gordon Sim <gsim@redhat.com>
+Date:   Wed Oct 24 23:27:38 2018 +0100
+
+    DISPATCH-1157: fix leaks in auth plugin
+
+diff --git a/src/policy.c b/src/policy.c
+index 2b03b736..636292ed 100644
+--- a/src/policy.c
++++ b/src/policy.c
+@@ -499,7 +499,9 @@ void qd_policy_deny_amqp_session(pn_session_t *ssn, qd_connection_t *qd_conn)
+     (void) pn_condition_set_name(       cond, QD_AMQP_COND_RESOURCE_LIMIT_EXCEEDED);
+     (void) pn_condition_set_description(cond, SESSION_DISALLOWED);
+     pn_session_close(ssn);
+-    qd_conn->policy_settings->denialCounts->sessionDenied++;
++    if (qd_conn->policy_settings->denialCounts) {
++        qd_conn->policy_settings->denialCounts->sessionDenied++;
++    }
+ }
+ 
+ 
+@@ -566,7 +568,9 @@ void _qd_policy_deny_amqp_link(pn_link_t *link, qd_connection_t *qd_conn, const
+ void _qd_policy_deny_amqp_sender_link(pn_link_t *pn_link, qd_connection_t *qd_conn, const char *condition)
+ {
+     _qd_policy_deny_amqp_link(pn_link, qd_conn, condition);
+-    qd_conn->policy_settings->denialCounts->senderDenied++;
++    if (qd_conn->policy_settings->denialCounts) {
++        qd_conn->policy_settings->denialCounts->senderDenied++;
++    }
+ }
+ 
+ 
+@@ -575,7 +579,9 @@ void _qd_policy_deny_amqp_sender_link(pn_link_t *pn_link, qd_connection_t *qd_co
+ void _qd_policy_deny_amqp_receiver_link(pn_link_t *pn_link, qd_connection_t *qd_conn, const char *condition)
+ {
+     _qd_policy_deny_amqp_link(pn_link, qd_conn, condition);
+-    qd_conn->policy_settings->denialCounts->receiverDenied++;
++    if (qd_conn->policy_settings->denialCounts) {
++        qd_conn->policy_settings->denialCounts->receiverDenied++;
++    }
+ }
+ 
+ 
+diff --git a/src/remote_sasl.c b/src/remote_sasl.c
+index edd76f15..a291b648 100644
+--- a/src/remote_sasl.c
++++ b/src/remote_sasl.c
+@@ -243,7 +243,7 @@ static void remote_sasl_free(pn_transport_t *transport)
+             }
+         } else {
+             impl->upstream_released = true;
+-            if (impl->downstream_released) {
++            if (impl->downstream_released || impl->downstream == 0) {
+                 delete_qdr_sasl_relay_t(impl);
+             }
+         }
+@@ -257,9 +257,6 @@ static void set_policy_settings(pn_connection_t* conn, permissions_t* permission
+         qd_conn->policy_settings = NEW(qd_policy_settings_t);
+         ZERO(qd_conn->policy_settings);
+ 
+-        qd_conn->policy_settings->denialCounts = NEW(qd_policy_denial_counts_t);
+-        ZERO(qd_conn->policy_settings->denialCounts);
+-
+         if (permissions->targets.start && permissions->targets.capacity) {
+             qd_conn->policy_settings->targets = qd_policy_compile_allowed_csv(permissions->targets.start);
+         }
