@@ -1,6 +1,6 @@
 PROJECT_NAME=qdrouterd
 PWD=$(shell pwd)
-ROUTER_SOURCE_URL=https://dist.apache.org/repos/dist/dev/qpid/dispatch/1.5.0-rc1/qpid-dispatch-1.5.0.tar.gz
+ROUTER_SOURCE_URL=http://github.com/apache/qpid-dispatch/archive/6160a35dcb134bbcec9b15a1fdbf04458441d946.tar.gz
 PROTON_SOURCE_URL=http://archive.apache.org/dist/qpid/proton/0.26.0/qpid-proton-0.26.0.tar.gz
 
 all: build
