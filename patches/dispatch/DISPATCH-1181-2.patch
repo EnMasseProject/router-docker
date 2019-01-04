@@ -1,0 +1,18 @@
+commit 48845b99848de3864bbe4246376237d5762b2de8
+Author: Gordon Sim <gsim@redhat.com>
+Date:   Mon Nov 12 20:37:44 2018 +0000
+
+    DISPATCH-1181: ensure local variable is initialised before it is used
+
+diff --git a/python/qpid_dispatch_internal/router/data.py b/python/qpid_dispatch_internal/router/data.py
+index 810f98d6..d299e725 100644
+--- a/python/qpid_dispatch_internal/router/data.py
++++ b/python/qpid_dispatch_internal/router/data.py
+@@ -277,6 +277,7 @@ class MessageMAU(object):
+         _add = ''
+         _del = ''
+         _exist = ''
++        _hints = ''
+         if self.add_list != None:   _add   = ' add=%r'   % self.add_list
+         if self.del_list != None:   _del   = ' del=%r'   % self.del_list
+         if self.exist_list != None: _exist = ' exist=%r' % self.exist_list
