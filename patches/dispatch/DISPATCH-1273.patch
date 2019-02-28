@@ -1,0 +1,163 @@
+From ee82bac3d890f652bc5776c5b3954e6b30bde9c0 Mon Sep 17 00:00:00 2001
+From: Gordon Sim <gsim@redhat.com>
+Date: Thu, 28 Feb 2019 10:25:02 +0000
+Subject: [PATCH] DISPATCH-1273: check permission to send to target for
+ anonymous sender links
+
+---
+ src/policy.c                                  | 37 +++++++++++++++++++
+ src/policy.h                                  |  7 ++++
+ src/router_node.c                             | 21 ++++++++---
+ tests/system_tests_authz_service_plugin.py.in | 22 ++++++++++-
+ 4 files changed, 81 insertions(+), 6 deletions(-)
+
+diff --git a/src/policy.c b/src/policy.c
+index d9ecddc1..81eaee07 100644
+--- a/src/policy.c
++++ b/src/policy.c
+@@ -892,6 +892,43 @@ static bool qd_policy_terminus_is_waypoint(pn_terminus_t *term)
+     return false;
+ }
+ 
++bool qd_policy_approve_message_target(qd_iterator_t *address, qd_connection_t *qd_conn)
++{
++#define ON_STACK_SIZE 2048
++    char  on_stack[ON_STACK_SIZE + 1];
++    char *buffer    = on_stack;
++    bool  on_heap = false;
++    int   length  = qd_iterator_length(address);
++
++    if (length > ON_STACK_SIZE) {
++        buffer    = (char*) malloc(length + 1);
++        on_heap = true;
++    }
++
++    const char* target = qd_iterator_strncpy(address, buffer, length + 1);
++
++    bool lookup = false;
++    if (qd_conn->policy_settings->targetParseTree) {
++        lookup = _qd_policy_approve_link_name_tree(qd_conn->user_id, qd_conn->policy_settings->targetPattern, target, qd_conn->policy_settings->targetParseTree);
++    } else if (qd_conn->policy_settings->targets) {
++        lookup = _qd_policy_approve_link_name(qd_conn->user_id, qd_conn->policy_settings->targets, target);
++    }
++
++    const char *hostip = qd_connection_remote_ip(qd_conn);
++    const char *vhost = pn_connection_remote_hostname(qd_connection_pn(qd_conn));
++    qd_log(qd_server_dispatch(qd_conn->server)->policy->log_source, (lookup ? QD_LOG_TRACE : QD_LOG_INFO),
++           "[%"PRIu64"]: %s AMQP message to '%s' for user '%s', rhost '%s', vhost '%s' based on target address",
++           qd_conn->connection_id, (lookup ? "ALLOW" : "DENY"), target, qd_conn->user_id, hostip, vhost);
++
++    if (on_heap)
++        free(buffer);
++
++    if (!lookup) {
++        return false;
++    } else {
++        return true;
++    }
++}
+ 
+ bool qd_policy_approve_amqp_sender_link(pn_link_t *pn_link, qd_connection_t *qd_conn)
+ {
+diff --git a/src/policy.h b/src/policy.h
+index 0b9fc0db..f1b9d0d5 100644
+--- a/src/policy.h
++++ b/src/policy.h
+@@ -215,4 +215,11 @@ char * qd_policy_host_pattern_lookup(qd_policy_t *policy, const char *hostPatter
+  * @return the ruleset string to be used in policy settings.
+  */
+ char * qd_policy_compile_allowed_csv(char * csv);
++/**
++ * Approve sending of message on anonymous link based on connection's policy.
++ *
++ * @param[in] address the address from the message 'to' field
++ * @param[in] qd_conn dispatch connection with policy settings
++ */
++bool qd_policy_approve_message_target(qd_iterator_t *address, qd_connection_t *qd_conn);
+ #endif
+diff --git a/src/router_node.c b/src/router_node.c
+index 2402abe6..6e9cc25a 100644
+--- a/src/router_node.c
++++ b/src/router_node.c
+@@ -550,11 +550,22 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
+         }
+ 
+         if (addr_iter) {
+-            qd_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_HASH);
+-            if (phase > 0)
+-                qd_iterator_annotate_phase(addr_iter, '0' + (char) phase);
+-            delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
+-                                           link_exclusions, ingress_index);
++            if (!conn->policy_settings || qd_policy_approve_message_target(addr_iter, conn)) {
++                qd_iterator_reset_view(addr_iter, ITER_VIEW_ADDRESS_HASH);
++                if (phase > 0)
++                    qd_iterator_annotate_phase(addr_iter, '0' + (char) phase);
++                delivery = qdr_link_deliver_to(rlink, msg, ingress_iter, addr_iter, pn_delivery_settled(pnd),
++                                               link_exclusions, ingress_index);
++            } else {
++                //reject
++                qd_log(router->log_source, QD_LOG_DEBUG, "Message rejected due to policy violation on target. User:%s", conn->user_id);
++                pn_link_flow(pn_link, 1);
++                pn_delivery_update(pnd, PN_REJECTED);
++                pn_delivery_settle(pnd);
++                qd_message_free(msg);
++                qd_iterator_free(addr_iter);
++                return next_delivery;
++            }
+         }
+     } else {
+         //
+diff --git a/tests/system_tests_authz_service_plugin.py.in b/tests/system_tests_authz_service_plugin.py.in
+index a214df9e..f3c4383f 100644
+--- a/tests/system_tests_authz_service_plugin.py.in
++++ b/tests/system_tests_authz_service_plugin.py.in
+@@ -126,9 +126,20 @@ mech_list: SCRAM-SHA-1 PLAIN
+         client = DynamicSourceAnonymousSender()
+         container.connect("admin:admin@127.0.0.1:%d" % self.router_port, handler=client)
+         container.run()
++        self.assertEqual(1, client.accepted)
+         self.assertEqual('hello', client.message)
+         self.assertEqual(0, len(client.errors))
+ 
++    @SkipIfNeeded(not SASL.extended(), "Cyrus library not available. skipping test")
++    def test_unauthorized_anonymous_sender_target(self):
++        container = Container()
++        client = DynamicSourceAnonymousSender()
++        container.connect("guest:guest@127.0.0.1:%d" % self.router_port, handler=client)
++        container.run()
++        self.assertEqual(0, client.accepted)
++        self.assertEqual(1, client.rejected)
++        self.assertEqual(None, client.message)
++
+ 
+ class AuthServicePluginAuthzDeprecatedTest(AuthServicePluginAuthzTest):
+     @classmethod
+@@ -189,11 +200,12 @@ class DynamicSourceAnonymousSender(MessagingHandler):
+         super(DynamicSourceAnonymousSender, self).__init__()
+         self.sender = None
+         self.message = None
++        self.accepted = 0
++        self.rejected = 0
+         self.errors = []
+ 
+     def on_message(self, event):
+         self.message = event.message.body;
+-        event.connection.close()
+ 
+     def on_link_opened(self, event):
+         if event.receiver:
+@@ -203,6 +215,14 @@ class DynamicSourceAnonymousSender(MessagingHandler):
+         event.container.create_receiver(event.connection, None, dynamic=True)
+         self.sender = event.container.create_sender(event.connection, None)
+ 
++    def on_accepted(self, event):
++        self.accepted += 1
++        event.connection.close()
++
++    def on_rejected(self, event):
++        self.rejected += 1
++        event.connection.close()
++
+ if __name__ == '__main__':
+     unittest.main(main_module())
+ 
