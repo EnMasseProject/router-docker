@@ -1,0 +1,21 @@
+commit 0f7d271d5f49357d72abd05df4ba15fe4f5d4378
+Author: Gordon Sim <gsim@redhat.com>
+Date:   Fri Mar 15 00:39:38 2019 +0000
+
+    DISPATCH-1287: when sender has indicated credit is drained, pending credit can be reset
+
+diff --git a/src/router_core/transfer.c b/src/router_core/transfer.c
+index a9caffde..4c843e4a 100644
+--- a/src/router_core/transfer.c
++++ b/src/router_core/transfer.c
+@@ -872,6 +872,10 @@ static void qdr_link_flow_CT(qdr_core_t *core, qdr_action_t *action, bool discar
+                 activate = true;
+             }
+             sys_mutex_unlock(link->conn->work_lock);
++        } else if (link->link_direction == QD_INCOMING) {
++            if (drain) {
++                link->credit_pending = link->capacity;
++            }
+         }
+     }
+ 
