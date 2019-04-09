@@ -1,0 +1,181 @@
+commit ade3b3b2aa28b09942f91b34b6e473471476543a
+Author: Ted Ross <tross@redhat.com>
+Date:   Fri Apr 5 16:47:00 2019 -0400
+
+    DISPATCH-1313 - Added policyVhost attribute to the listener entity.  This optional field, if supplied, provides the vhost name to be used for policy lookup on connections arriving through the listener.  It allows multiple listeners to use different policy settings.
+
+diff --git a/include/qpid/dispatch/server.h b/include/qpid/dispatch/server.h
+index 5a4c115c..043baa56 100644
+--- a/include/qpid/dispatch/server.h
++++ b/include/qpid/dispatch/server.h
+@@ -351,6 +351,12 @@ typedef struct qd_server_config_t {
+      */
+     bool multi_tenant;
+ 
++    /**
++     * Optional vhost to use for policy lookup.  If non-null, this overrides the vhost supplied
++     * in the OPEN from the peer only for the purpose of identifying the policy to enforce.
++     */
++    char *policy_vhost;
++
+     /**
+      * The specified role of the connection.  This can be used to control the behavior and
+      * capabilities of the connections.
+diff --git a/python/qpid_dispatch/management/qdrouter.json b/python/qpid_dispatch/management/qdrouter.json
+index cbf154fa..195350e7 100644
+--- a/python/qpid_dispatch/management/qdrouter.json
++++ b/python/qpid_dispatch/management/qdrouter.json
+@@ -874,6 +874,12 @@
+                     "description": "A comma separated list that indicates which components of the message should be logged. Defaults to 'none' (log nothing). If you want all properties and application properties of the message logged use 'all'. Specific components of the message can be logged by indicating the components via a comma separated list. The components are message-id, user-id, to, subject, reply-to, correlation-id, content-type, content-encoding, absolute-expiry-time, creation-time, group-id, group-sequence, reply-to-group-id, app-properties. The application-data part of the bare message will not be logged. No spaces are allowed",
+                     "deprecationName": "logMessage",
+                     "create": true
++                },
++                "policyVhost": {
++                    "type": "string",
++                    "required": false,
++                    "description": "A listener may optionally define a virtual host to index to a specific policy to restrict the remote container to access only specific resources. This attribute defines the name of the policy vhost for this listener.  If multi-tenancy is enabled for the listener, this vhost will override the peer-supplied vhost for the purposes of identifying the desired policy settings for the connections.",
++                    "create": true
+                 }
+             }
+         },
+diff --git a/src/connection_manager.c b/src/connection_manager.c
+index bea3a4b7..309f6058 100644
+--- a/src/connection_manager.c
++++ b/src/connection_manager.c
+@@ -304,7 +304,7 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
+     bool requireEncryption  = qd_entity_opt_bool(entity, "requireEncryption", false);    CHECK();
+     bool requireSsl         = qd_entity_opt_bool(entity, "requireSsl",        false);    CHECK();
+ 
+-    memset(config, 0, sizeof(*config));
++    ZERO(config);
+     config->log_message          = qd_entity_opt_string(entity, "messageLoggingComponents", 0);     CHECK();
+     config->log_bits             = populate_log_message(config);
+     config->port                 = qd_entity_get_string(entity, "port");              CHECK();
+@@ -332,6 +332,7 @@ static qd_error_t load_server_config(qd_dispatch_t *qd, qd_server_config_t *conf
+     config->sasl_plugin          = qd_entity_opt_string(entity, "saslPlugin", 0);   CHECK();
+     config->link_capacity        = qd_entity_opt_long(entity, "linkCapacity", 0);     CHECK();
+     config->multi_tenant         = qd_entity_opt_bool(entity, "multiTenant", false);  CHECK();
++    config->policy_vhost         = qd_entity_opt_string(entity, "policyVhost", 0);    CHECK();
+     set_config_host(config, entity);
+ 
+     //
+diff --git a/src/policy.c b/src/policy.c
+index a6e729e7..12afd749 100644
+--- a/src/policy.c
++++ b/src/policy.c
+@@ -1103,12 +1103,16 @@ void qd_policy_amqp_open(qd_connection_t *qd_conn) {
+     qd_policy_t *policy = qd->policy;
+     bool connection_allowed = true;
+ 
++    const char *policy_vhost = 0;
++    if (!!qd_conn->listener)
++        policy_vhost = qd_conn->listener->config.policy_vhost;
++
+     if (policy->enableVhostPolicy && (!qd_conn->role || strcmp(qd_conn->role, "inter-router"))) {
+         // Open connection or not based on policy.
+         pn_transport_t *pn_trans = pn_connection_transport(conn);
+         const char *hostip = qd_connection_remote_ip(qd_conn);
+         const char *pcrh = pn_connection_remote_hostname(conn);
+-        const char *vhost = (pcrh ? pcrh : "");
++        const char *vhost = (policy_vhost ? policy_vhost : (pcrh ? pcrh : ""));
+         const char *conn_name = qd_connection_name(qd_conn);
+ #define SETTINGS_NAME_SIZE 256
+         char settings_name[SETTINGS_NAME_SIZE];
+diff --git a/tests/policy-3/test-sender-receiver-limits.json b/tests/policy-3/test-sender-receiver-limits.json
+index 2d21f3e5..0668800e 100644
+--- a/tests/policy-3/test-sender-receiver-limits.json
++++ b/tests/policy-3/test-sender-receiver-limits.json
+@@ -69,5 +69,28 @@
+         }
+       }
+     }
++  ],
++  ["vhost", {
++      "hostname": "override.host.com",
++      "maxConnections": 50,
++      "maxConnectionsPerUser": 2,
++      "maxConnectionsPerHost": 4,
++      "allowUnknownUser": true,
++      "groups": {
++        "$default" : {
++          "remoteHosts": "*",
++          "maxFrameSize":     222222,
++          "maxMessageSize":   222222,
++          "maxSessionWindow": 222222,
++          "maxSessions":           2,
++          "maxSenders":            3,
++          "maxReceivers":          5,
++          "allowDynamicSource":   true,
++          "allowAnonymousSender": true,
++          "sources": "*",
++          "targets": "*"
++        }
++      }
++    }
+   ]
+ ]
+diff --git a/tests/system_tests_policy.py b/tests/system_tests_policy.py
+index d0ffc5b6..1a260e8f 100644
+--- a/tests/system_tests_policy.py
++++ b/tests/system_tests_policy.py
+@@ -313,6 +313,60 @@ class SenderReceiverLimits(TestCase):
+         bs1.close()
+ 
+ 
++class PolicyVhostOverride(TestCase):
++    """
++    Verify that specifying a policy folder from the router conf file
++    effects loading the policies in that folder.
++    This test relies on qdmanage utility.
++    """
++    @classmethod
++    def setUpClass(cls):
++        """Start the router"""
++        super(PolicyVhostOverride, cls).setUpClass()
++        policy_config_path = os.path.join(DIR, 'policy-3')
++        config = Qdrouterd.Config([
++            ('router', {'mode': 'standalone', 'id': 'QDR.Policy'}),
++            ('listener', {'port': cls.tester.get_port(), 'policyVhost': 'override.host.com'}),
++            ('policy', {'maxConnections': 2, 'policyDir': policy_config_path, 'enableVhostPolicy': 'true'})
++        ])
++
++        cls.router = cls.tester.qdrouterd('PolicyVhostOverride', config, wait=True)
++
++    def address(self):
++        return self.router.addresses[0]
++
++    def test_verify_n_receivers(self):
++        n = 4
++        addr = self.address()
++        br1 = BlockingConnection(addr)
++
++        # n receivers OK
++        br1.create_receiver(address="****YES_1of5***")
++        br1.create_receiver(address="****YES_20f5****")
++        br1.create_receiver(address="****YES_3of5****")
++        br1.create_receiver(address="****YES_4of5****")
++        br1.create_receiver(address="****YES_5of5****")
++
++        # receiver n+1 should be denied
++        self.assertRaises(LinkDetached, br1.create_receiver, "****NO****")
++
++        br1.close()
++
++    def test_verify_n_senders(self):
++        n = 2
++        addr = self.address()
++        bs1 = BlockingConnection(addr)
++
++        # n senders OK
++        bs1.create_sender(address="****YES_1of3****")
++        bs1.create_sender(address="****YES_2of3****")
++        bs1.create_sender(address="****YES_3of3****")
++        # sender n+1 should be denied
++        self.assertRaises(LinkDetached, bs1.create_sender, "****NO****")
++
++        bs1.close()
++
++
+ class InterrouterLinksAllowed(TestCase):
+ 
+     inter_router_port = None

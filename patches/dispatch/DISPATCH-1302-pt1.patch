@@ -1,0 +1,96 @@
+commit a1288f7c7f56470b7a50fbf75988c6dde2152507
+Author: Kenneth Giusti <kgiusti@apache.org>
+Date:   Thu Mar 28 15:58:57 2019 -0400
+
+    DISPATCH-1302: only settle inbound pn_delivery locally in response to PN_DELIVERY event
+
+diff --git a/src/container.c b/src/container.c
+index e046bfcf..410bae47 100644
+--- a/src/container.c
++++ b/src/container.c
+@@ -636,10 +636,11 @@ void qd_container_handle_event(qd_container_t *container, pn_event_t *event,
+     case PN_DELIVERY :
+         delivery = pn_event_delivery(event);
+         pn_link  = pn_event_link(event);
++
+         if (pn_link_is_receiver(pn_link))
+             do_receive(delivery);
+ 
+-        if (pn_delivery_updated(delivery)) {
++        if (pn_delivery_updated(delivery) || pn_delivery_settled(delivery)) {
+             do_updated(delivery);
+             pn_delivery_clear(delivery);
+         }
+diff --git a/src/router_node.c b/src/router_node.c
+index ca783655..3639ddbc 100644
+--- a/src/router_node.c
++++ b/src/router_node.c
+@@ -376,14 +376,6 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
+             //
+             if (!qd_message_is_discard(msg)) {
+                 qdr_deliver_continue(delivery);
+-
+-                //
+-                // Settle the proton delivery only if all the data has been received.
+-                //
+-                if (pn_delivery_settled(pnd) && receive_complete) {
+-                    qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
+-                    pn_delivery_settle(pnd);
+-                }
+             }
+         }
+         else {
+@@ -461,12 +453,6 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
+         //
+         if (!qd_message_is_discard(msg)) {
+             qdr_deliver_continue(delivery);
+-            if (receive_complete) {
+-                if (pn_delivery_settled(pnd)) {
+-                    qdr_node_disconnect_deliveries(router->router_core, link, delivery, pnd);
+-                    pn_delivery_settle(pnd);
+-                }
+-            }
+         }
+ 
+         return next_delivery;
+@@ -603,17 +589,6 @@ static bool AMQP_rx_handler(void* context, qd_link_t *link)
+     }
+ 
+     if (delivery) {
+-        //
+-        // Settle the proton delivery only if all the data has arrived
+-        //
+-        if (pn_delivery_settled(pnd)) {
+-            if (receive_complete) {
+-                pn_delivery_settle(pnd);
+-                qdr_delivery_decref(router->router_core, delivery, "release protection of return from deliver");
+-                return next_delivery;
+-            }
+-        }
+-
+         qdr_node_connect_deliveries(link, delivery, pnd);
+         qdr_delivery_decref(router->router_core, delivery, "release protection of return from deliver");
+     } else {
+@@ -1589,9 +1564,8 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
+             // Aborted messages must be settled locally
+             // Settling does not produce any disposition to message sender.
+             if (pdlv) {
+-                if (qdr_delivery_get_context(dlv) != 0)
+-                    qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
+                 pn_link_advance(plink);
++                qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
+                 pn_delivery_settle(pdlv);
+             }
+         } else {
+@@ -1605,8 +1579,10 @@ static uint64_t CORE_link_deliver(void *context, qdr_link_t *link, qdr_delivery_
+             pn_link_advance(plink);
+ 
+             if (settled || remote_snd_settled) {
+-                if (pdlv)
++                if (pdlv) {
++                    qdr_node_disconnect_deliveries(router->router_core, qlink, dlv, pdlv);
+                     pn_delivery_settle(pdlv);
++                }
+             }
+         }
+         log_link_message(qconn, plink, msg_out);
