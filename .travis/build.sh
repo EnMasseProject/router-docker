@@ -2,7 +2,8 @@
 # Assumes that COMMIT, DOCKER_USER and DOCKER_PASS to be set
 VERSION=${1:-"latest"}
 COMMIT=$2
-REPO=enmasseproject/qdrouterd-base
+DOCKER_REGISTRY=quay.io
+REPO=${DOCKER_REGISTRY}/enmasse/qdrouterd-base
 
 if [ -n "$TRAVIS_TAG" ]
 then
