@@ -1,3 +1,7 @@
+*DEPRECATED* This image is no longer used by EnMasse 0.30.0 and newer. 
+
+Look at https://github.com/interconnectedcloud/qdr-image for the image used by EnMasse
+
 # router-docker-base
 Router base image based on Qpid Dispatch and Qpid Proton with patches needed for EnMasse.
 
